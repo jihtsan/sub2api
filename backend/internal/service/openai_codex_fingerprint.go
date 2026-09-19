@@ -445,6 +445,9 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 
 	if ids.installationID != "" {
 		existing["x-codex-installation-id"] = ids.installationID
+		if _, exists := existing["installation_id"]; exists {
+			existing["installation_id"] = ids.installationID
+		}
 		modified = true
 	}
 
@@ -460,6 +463,11 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 	existing["thread_id"] = ids.threadID
 	existing["turn_id"] = ids.turnID
 	existing["x-codex-window-id"] = ids.windowID
+	for key, value := range map[string]string{"session-id": ids.sessionID, "thread-id": ids.threadID, "turn-id": ids.turnID, "window_id": ids.windowID, "x-client-request-id": ids.threadID} {
+		if _, present := existing[key]; present {
+			existing[key] = value
+		}
+	}
 
 	rewriteClientMetadataEmbeddedTurnMetadata(existing, map[string]any{
 		"installation_id":         ids.installationID,
@@ -598,4 +606,43 @@ func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fi
 	if rebuilt, err := json.Marshal(metadata); err == nil {
 		clientMetadata["x-codex-turn-metadata"] = string(rebuilt)
 	}
+}
+
+type codexWSClientSession struct {
+	accountID int64
+	raw       string
+}
+
+// Native WS shares the same fingerprint projection as HTTP. Keep the first
+// client session for this connection while refreshing per-turn identifiers.
+func applyCodexWSIdentityRaw(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
+	apiKeyID := getAPIKeyIDFromContext(c)
+	next, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, codexAccountIdentitySource(c, account), apiKeyID)
+	if err != nil {
+		return body, false, err
+	}
+	var headers http.Header
+	if c != nil && c.Request != nil {
+		headers = c.Request.Header
+	}
+	rawSession := extractClientSessionID(headers)
+	if rawSession == "" {
+		rawSession = strings.TrimSpace(gjson.GetBytes(body, "client_metadata.session_id").String())
+	}
+	if c != nil && account != nil {
+		const key = "codex_ws_client_session"
+		value, _ := c.Get(key)
+		if saved, ok := value.(codexWSClientSession); ok && saved.accountID == account.ID {
+			rawSession = saved.raw
+		} else {
+			if rawSession == "" {
+				rawSession = uuid.NewString()
+			}
+			c.Set(key, codexWSClientSession{account.ID, rawSession})
+		}
+	}
+	ids := resolveCodexFingerprintIDs(account, rawSession, account.GetCodexFingerprintMode())
+	stageCodexFingerprintIDs(c, ids)
+	next, projected, err := applyCodexFingerprintClientMetadataRaw(next, ids)
+	return next, changed || projected, err
 }

@@ -1578,6 +1578,8 @@
       </div>
 
 
+      <AccountTrafficControls v-if="account" v-model="trafficPolicy" :account-id="account.id" :platform="account.platform" :hard-limit="form.concurrency" :disabled="submitting" />
+
       <div
         v-if="supportsAccountSchedulingThresholdOverride"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3038,6 +3040,8 @@ import type {
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState
 } from '@/types'
+import AccountTrafficControls from '@/components/account/AccountTrafficControls.vue'
+import { defaultTrafficPolicy, normalizeTrafficDraft, type AccountTrafficPolicy } from '@/api/admin/accountTraffic'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -3935,6 +3939,9 @@ const applyOpenAIModelMappingCredentials = (credentials: Record<string, unknown>
   }
 }
 
+const trafficPolicy = ref<AccountTrafficPolicy>(defaultTrafficPolicy())
+let initialTrafficPolicy = ''
+
 const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
@@ -3952,6 +3959,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
+  trafficPolicy.value = { ...defaultTrafficPolicy(), ...(newAccount.extra?.account_traffic_control as Partial<AccountTrafficPolicy> | undefined) }
+  initialTrafficPolicy = JSON.stringify(trafficPolicy.value)
   form.concurrency = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
@@ -5680,6 +5689,13 @@ const handleSubmit = async () => {
         delete newExtra.upstream_request_id_header
       }
       updatePayload.extra = newExtra
+    }
+
+    if (JSON.stringify(trafficPolicy.value) !== initialTrafficPolicy) {
+      updatePayload.extra = {
+        ...((updatePayload.extra || props.account.extra || {}) as Record<string, unknown>),
+        account_traffic_control: normalizeTrafficDraft(trafficPolicy.value)
+      }
     }
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {

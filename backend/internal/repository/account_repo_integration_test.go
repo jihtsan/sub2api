@@ -881,7 +881,7 @@ func (s *AccountRepoSuite) TestSetRateLimitedIfLaterDoesNotShortenReset() {
 	s.repo.schedulerCache = cacheRecorder
 
 	s.Require().NoError(s.repo.SetRateLimitedIfLater(s.ctx, account.ID, later))
-	s.Require().NoError(s.repo.SetRateLimitedIfLater(s.ctx, account.ID, earlier))
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, earlier))
 
 	got, err := s.repo.GetByID(s.ctx, account.ID)
 	s.Require().NoError(err)

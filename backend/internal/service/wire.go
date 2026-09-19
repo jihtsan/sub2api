@@ -244,6 +244,7 @@ func ProvideAccountUsageService(
 }
 
 func ProvideAccountTestService(
+	concurrencyService *ConcurrencyService,
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
 	claudeTokenProvider *ClaudeTokenProvider,
@@ -267,6 +268,7 @@ func ProvideAccountTestService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	service.concurrencyService = concurrencyService
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
@@ -836,6 +838,7 @@ var ProviderSet = wire.NewSet(
 	NewRedeemService,
 	NewPromoService,
 	NewUsageService,
+	ProvideAccountTrafficService,
 	NewDashboardService,
 	ProvidePricingService,
 	NewBillingService,

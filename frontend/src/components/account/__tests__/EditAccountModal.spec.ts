@@ -1699,3 +1699,20 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     wrapper.unmount()
   })
 })
+
+describe('account traffic settings', () => {
+  it('saves optional controls together with the normal account form', async () => {
+    updateAccountMock.mockReset()
+    updateAccountMock.mockResolvedValue(buildAccount())
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="traffic-rpm-toggle"]').setValue(true)
+    await wrapper.get('[data-testid="traffic-observe-toggle"]').setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1))
+    expect(updateAccountMock.mock.calls[0][1].extra.account_traffic_control).toMatchObject({
+      strict_rpm_enabled: true, rpm: 60, burst: 5, adaptive_enabled: true, adaptive_mode: 'observe'
+    })
+    wrapper.unmount()
+  })
+})

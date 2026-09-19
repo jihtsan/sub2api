@@ -769,6 +769,11 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 
+	if failoverErr.Reason == "account_traffic_limit" {
+		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+		googleError(c, failoverErr.StatusCode, failoverErr.ClientMessage)
+		return
+	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
