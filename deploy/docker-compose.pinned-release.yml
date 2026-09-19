@@ -1,0 +1,7 @@
+# Overlay the existing production Compose file. Preserve its env and volumes.
+# Supply a verified immutable image ID (sha256:...) or a digest-pinned image.
+services:
+  sub2api:
+    image: ${SUB2API_RELEASE_IMAGE:?Set the verified release image ID or digest}
+    pull_policy: never
+    stop_grace_period: 60s
