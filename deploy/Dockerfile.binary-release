@@ -1,0 +1,11 @@
+# Build context contains only a verified Linux binary named sub2api.
+# Pin RUNTIME_IMAGE to the tested runtime digest; never copy production data
+# or commit a running container (its configuration can contain credentials).
+ARG RUNTIME_IMAGE=weishaw/sub2api@sha256:3e744ca5304e376c8720b6018f2e728bd28a0f16343ad9aa37ac28b8855ffd5c
+FROM ${RUNTIME_IMAGE}
+ARG RELEASE_COMMIT
+ARG RELEASE_VERSION
+LABEL org.opencontainers.image.source="https://github.com/jihtsan/sub2api" \
+      org.opencontainers.image.revision="${RELEASE_COMMIT}" \
+      org.opencontainers.image.version="${RELEASE_VERSION}"
+COPY --chown=1000:1000 --chmod=755 sub2api /app/sub2api
