@@ -34,10 +34,15 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	attempt int,
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
-) (*OpenAIForwardResult, error) {
+) (trafficResult *OpenAIForwardResult, trafficErr error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
+	ctx, permit, admissionErr := beginAccountTrafficTurn(ctx, s.httpUpstream, account)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
+	defer func() { finishAccountTrafficTurn(permit, trafficErr) }()
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
@@ -609,6 +614,7 @@ readLoop:
 			message = normalized
 		}
 
+		permit.observeEvent(message)
 		eventType, eventResponseID, responseField := parseOpenAIWSEventEnvelope(message)
 		if eventType == "" {
 			continue

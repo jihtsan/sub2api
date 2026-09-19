@@ -159,6 +159,7 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
+	traffic *service.AccountTrafficService
 	cfg     *config.Config                  // 全局配置
 	mu      sync.RWMutex                    // 保护 clients map 的读写锁
 	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
@@ -174,7 +175,9 @@ type httpUpstreamService struct {
 //
 // 返回:
 //   - service.HTTPUpstream 接口实现
-func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
+func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream { return newHTTPUpstreamService(cfg) }
+
+func newHTTPUpstreamService(cfg *config.Config) *httpUpstreamService {
 	return &httpUpstreamService{
 		cfg:     cfg,
 		clients: make(map[string]*upstreamClientEntry),
@@ -198,6 +201,12 @@ func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
 //   - 调用方必须关闭 resp.Body，否则会导致 inFlight 计数泄漏
 //   - inFlight > 0 的客户端不会被淘汰，确保活跃请求不被中断
 func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	return s.traffic.DoHTTP(req, func(req *http.Request) (*http.Response, error) {
+		return s.doUncontrolled(req, proxyURL, accountID, accountConcurrency)
+	})
+}
+
+func (s *httpUpstreamService) doUncontrolled(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	applyGrokCLIProxyHeaders(req)
 	if err := s.validateRequestHost(req); err != nil {
 		return nil, err
@@ -244,6 +253,12 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 // profile 为 nil 时不启用 TLS 指纹，行为与 Do 方法相同。
 // profile 非 nil 时使用指定的 Profile 进行 TLS 指纹伪装。
 func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.traffic.DoHTTP(req, func(req *http.Request) (*http.Response, error) {
+		return s.dowithtlsUncontrolled(req, proxyURL, accountID, accountConcurrency, profile)
+	})
+}
+
+func (s *httpUpstreamService) dowithtlsUncontrolled(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	if profile == nil {
 		return s.Do(req, proxyURL, accountID, accountConcurrency)
 	}
@@ -1552,4 +1567,13 @@ func (d *decompressedBody) Close() error {
 		_ = rc.Close()
 	}
 	return d.closer.Close()
+}
+
+func NewControlledHTTPUpstream(cfg *config.Config, traffic *service.AccountTrafficService) service.HTTPUpstream {
+	s := newHTTPUpstreamService(cfg)
+	s.traffic = traffic
+	return s
+}
+func (s *httpUpstreamService) AccountTrafficController() *service.AccountTrafficService {
+	return s.traffic
 }

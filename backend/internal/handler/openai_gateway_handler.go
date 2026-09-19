@@ -1581,6 +1581,10 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+		if failoverErr.Reason == "account_traffic_limit" {
+			h.anthropicStreamingAwareError(c, failoverErr.ClientStatusCode, service.AccountTrafficErrorType(failoverErr.ClientStatusCode), failoverErr.ClientMessage, streamStarted)
+			return
+		}
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -3360,6 +3364,10 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	if failoverErr.Reason == "account_traffic_limit" {
+		h.handleStreamingAwareError(c, failoverErr.ClientStatusCode, service.AccountTrafficErrorType(failoverErr.ClientStatusCode), failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)
@@ -3792,7 +3800,18 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		if reason := strings.TrimSpace(string(failoverErr.Reason)); reason != "" {
 			errorCode = reason
 		}
-		if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
+		if failoverErr.Reason == "account_traffic_limit" {
+			intendedStatus = failoverErr.StatusCode
+			errorType = service.AccountTrafficErrorType(intendedStatus)
+			message = failoverErr.ClientMessage
+			closeStatus = coderws.StatusTryAgainLater
+			if conn != nil {
+				payload, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": errorType, "code": errorCode, "message": message, "retry_after": failoverErr.ResponseHeaders.Get("Retry-After")}})
+				writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = conn.Write(writeCtx, coderws.MessageText, payload)
+				cancel()
+			}
+		} else if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
 			intendedStatus = http.StatusServiceUnavailable
 			errorType = "api_error"
 			message = service.GrokCredentialUnavailableClientMessage

@@ -363,6 +363,9 @@ func antigravityCompatProxyURL(account *Account) string {
 }
 
 func (s *AntigravityGatewayService) handleAntigravityCompatTransportError(c *gin.Context, err error) error {
+	if local := AccountTrafficFailover(err); local != nil {
+		return local
+	}
 	if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
 		return &UpstreamFailoverError{
 			StatusCode:        http.StatusServiceUnavailable,

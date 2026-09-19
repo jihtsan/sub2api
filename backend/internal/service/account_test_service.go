@@ -138,6 +138,7 @@ func normalizeGrokAccountTestMode(mode string) string {
 
 // AccountTestService handles account testing operations
 type AccountTestService struct {
+	concurrencyService        *ConcurrencyService
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -355,6 +356,19 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return nil
 	}
 
+	if err := accountTestCooldown(ctx, account, accountTestAdmissionModel(account, modelID), time.Now()); err != nil {
+		var wait *TestAdmissionWaitError
+		if errors.As(err, &wait) {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("%s; retry after %s", wait.Reason, wait.Until.UTC().Format(time.RFC3339)))
+		}
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	release, err := s.acquireTestAccountSlot(ctx, account)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	defer release()
+
 	// Route to platform-specific test method
 	if account.IsCNProvider() {
 		switch account.GetAPIProtocol() {
@@ -559,7 +573,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -631,7 +645,7 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -717,7 +731,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, nil)
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -1224,7 +1238,7 @@ func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx con
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json, text/event-stream")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API request failed: %s", err.Error()))
 	}
@@ -1312,7 +1326,7 @@ func (s *AccountTestService) testGrokImageGeneration(c *gin.Context, ctx context
 			s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 			req.ContentLength = int64(len(payloadBytes))
 		}
-		resp, doErr = s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		resp, doErr = s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 		if doErr == nil {
 			break
 		}
@@ -1403,7 +1417,7 @@ func (s *AccountTestService) testGrokVideoGeneration(c *gin.Context, ctx context
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video request failed: %s", err.Error()))
 	}
@@ -1444,7 +1458,7 @@ func (s *AccountTestService) testGrokVideoGeneration(c *gin.Context, ctx context
 			return s.sendErrorAndEnd(c, "Failed to create Grok video status request")
 		}
 		s.applyGrokTestRequestHeaders(statusReq, account, authToken, "application/json")
-		statusResp, err := s.httpUpstream.Do(statusReq, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		statusResp, err := s.httpUpstream.Do(WithAccountTrafficRequest(statusReq, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video status failed: %s", err.Error()))
 		}
@@ -1501,7 +1515,7 @@ func (s *AccountTestService) emitGrokVideoResult(c *gin.Context, ctx context.Con
 		return s.sendErrorAndEnd(c, "Failed to create Grok video content request")
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "video/*, application/octet-stream, */*")
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video content download failed: %s", err.Error()))
 	}
@@ -1573,7 +1587,7 @@ User query:
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("standalone web_search probe failed: %s", err.Error()))
 	}
@@ -1654,7 +1668,7 @@ func (s *AccountTestService) testGrokTTS(c *gin.Context, ctx context.Context, ac
 			return s.sendErrorAndEnd(c, "Failed to create Grok TTS request")
 		}
 		s.applyGrokTestRequestHeaders(req, account, authToken, "audio/*, application/json, */*")
-		resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Grok TTS failed: %s", err.Error()))
 		}
@@ -1745,7 +1759,7 @@ func (s *AccountTestService) testGrokSTT(c *gin.Context, ctx context.Context, ac
 	}
 	account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.httpUpstream.Do(WithAccountTrafficRequest(req, account), s.grokTestProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok STT failed: %s", err.Error()))
 	}
@@ -1772,7 +1786,12 @@ func (s *AccountTestService) testGrokSTT(c *gin.Context, ctx context.Context, ac
 // (wss://api.x.ai/v1/realtime?model=...) to verify auth + endpoint reachability.
 // It does not run a full audio session — success is WS handshake, optionally
 // enriched with the first server event type when one arrives quickly.
-func (s *AccountTestService) testGrokRealtime(c *gin.Context, ctx context.Context, account *Account, authToken, modelID string) error {
+func (s *AccountTestService) testGrokRealtime(c *gin.Context, ctx context.Context, account *Account, authToken, modelID string) (trafficErr error) {
+	ctx, permit, admissionErr := beginAccountTrafficTurn(ctx, s.httpUpstream, account)
+	if admissionErr != nil {
+		return s.sendErrorAndEnd(c, admissionErr.Error())
+	}
+	defer func() { finishAccountTrafficTurn(permit, trafficErr) }()
 	model := strings.TrimSpace(modelID)
 	if model == "" {
 		model = defaultGrokRealtimeTestModel
@@ -2112,7 +2131,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) request failed: %s", err.Error()))
 	}
@@ -2393,7 +2412,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -3021,7 +3040,7 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(WithAccountTrafficRequest(req, account), proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -3299,4 +3318,28 @@ func parseTestSSEOutput(body string) (responseText, errMsg string) {
 	}
 	responseText = strings.Join(texts, "")
 	return
+}
+
+// Match the default model used by each ordinary account tester. Explicit models
+// are passed unmapped: the cooldown resolver applies mapping exactly once.
+func accountTestAdmissionModel(account *Account, model string) string {
+	if model == "" {
+		switch {
+		case account.IsOpenAI():
+			model = openai.DefaultTestModel
+		case account.IsGemini():
+			model = geminicli.DefaultTestModel
+		case account.Platform == PlatformAntigravity:
+			model = antigravityConnectionTestModel(model)
+		case account.Platform == PlatformGrok:
+			model = grokDefaultResponsesModel
+		case account.IsOpenCodeGo():
+			model = DefaultOpenCodeGoTestModel
+		case account.IsCNProvider() && account.GetAPIProtocol() != APIProtocolAnthropic:
+			model = openai.DefaultTestModel
+		default:
+			model = claude.DefaultTestModel
+		}
+	}
+	return model
 }
